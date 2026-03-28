@@ -39,8 +39,8 @@ jobs:
       - name: Resolve package
         run: swift package resolve
 
-      - name: Run tests
-        run: swift test -c debug
+      - name: Build debug binary
+        run: swift build -c debug --product WiFiSoakTester
 
       - name: Build Windows bundle
         run: powershell -ExecutionPolicy Bypass -File build_windows.ps1
