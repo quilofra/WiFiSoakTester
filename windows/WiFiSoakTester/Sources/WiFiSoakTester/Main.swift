@@ -2,7 +2,7 @@ import Foundation
 import Dispatch
 
 #if os(Windows)
-import ucrt
+import WinSDK
 #elseif canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
@@ -11,23 +11,29 @@ import Darwin
 
 private enum PlatformConsole {
     static func writeLine(_ line: String = "") {
-        Swift.print(line)
-        flushStandardOutput()
+        write(line, to: .standardOutput)
+        write("\n", to: .standardOutput)
     }
 
     static func writeErrorLine(_ line: String) {
-        guard let data = "\(line)\n".data(using: .utf8) else { return }
-        FileHandle.standardError.write(data)
+        write(line, to: .standardError)
+        write("\n", to: .standardError)
     }
 
-    private static func flushStandardOutput() {
-        _ = fflush(stdout)
+    private static func write(_ string: String, to handle: FileHandle) {
+        guard let data = string.data(using: .utf8) else { return }
+        handle.write(data)
     }
 }
 
 private enum PlatformProcess {
     static func terminate(with code: Int32) -> Never {
+        #if os(Windows)
+        ExitProcess(UINT(code))
+        fatalError("ExitProcess returned unexpectedly")
+        #else
         exit(code)
+        #endif
     }
 }
 
