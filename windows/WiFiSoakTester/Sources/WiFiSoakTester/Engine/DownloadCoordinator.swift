@@ -9,6 +9,183 @@ enum DownloadWorkerError: Error {
     case lowPerformance(currentRateBps: Double)
 }
 
+private actor ChunkProcessor {
+    private let workerID: Int
+    private let url: URL
+    private let configuration: DownloadConfiguration
+    private let metricsStore: MetricsStore
+    private let sink: any ByteSink
+    private let rateLimiter: RateLimiter?
+
+    private var bytesSinceRateCheck: Int64 = 0
+    private var lowRateElapsed: TimeInterval = 0
+    private var lastRateCheck = Date()
+
+    init(
+        workerID: Int,
+        url: URL,
+        configuration: DownloadConfiguration,
+        metricsStore: MetricsStore,
+        sink: any ByteSink,
+        rateLimiter: RateLimiter?
+    ) {
+        self.workerID = workerID
+        self.url = url
+        self.configuration = configuration
+        self.metricsStore = metricsStore
+        self.sink = sink
+        self.rateLimiter = rateLimiter
+    }
+
+    func process(_ data: Data) async throws {
+        guard !data.isEmpty else { return }
+
+        try await sink.consume(data)
+
+        let count = Int64(data.count)
+        await metricsStore.recordBytes(workerID: workerID, bytes: count, url: url)
+        if let rateLimiter {
+            await rateLimiter.acquire(bytes: count)
+        }
+
+        bytesSinceRateCheck += count
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastRateCheck)
+        guard elapsed >= 1 else { return }
+
+        let currentRate = Double(bytesSinceRateCheck) / elapsed
+        if configuration.minRateBps > 0 {
+            if currentRate < configuration.minRateBps {
+                lowRateElapsed += elapsed
+            } else {
+                lowRateElapsed = 0
+            }
+
+            if lowRateElapsed >= max(configuration.switchAfterSeconds, 1) {
+                throw DownloadWorkerError.lowPerformance(currentRateBps: currentRate)
+            }
+        }
+
+        bytesSinceRateCheck = 0
+        lastRateCheck = now
+    }
+}
+
+#if os(Windows)
+private final class ChunkResultBox: @unchecked Sendable {
+    let semaphore = DispatchSemaphore(value: 0)
+    var error: Error?
+}
+
+private final class WindowsStreamingDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let processor: ChunkProcessor
+    private let lock = NSLock()
+    private var completion: CheckedContinuation<Void, Error>?
+    private var pendingError: Error?
+    private var activeTask: URLSessionDataTask?
+
+    init(processor: ChunkProcessor) {
+        self.processor = processor
+    }
+
+    func stream(request: URLRequest, session: URLSession) async throws {
+        try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                completion = continuation
+                let task = session.dataTask(with: request)
+                activeTask = task
+                lock.unlock()
+                task.resume()
+            }
+        }, onCancel: {
+            self.cancel()
+        })
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            setPendingError(DownloadWorkerError.invalidHTTPStatus(http.statusCode))
+            completionHandler(.cancel)
+            return
+        }
+
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        let box = ChunkResultBox()
+
+        Task {
+            do {
+                try await self.processor.process(data)
+            } catch {
+                box.error = error
+            }
+            box.semaphore.signal()
+        }
+
+        box.semaphore.wait()
+
+        if let error = box.error {
+            setPendingError(error)
+            dataTask.cancel()
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        let result: Result<Void, Error>
+
+        if let pendingError = takePendingError() {
+            result = .failure(pendingError)
+        } else if let error {
+            result = .failure(error)
+        } else {
+            result = .success(())
+        }
+
+        finish(with: result)
+    }
+
+    private func cancel() {
+        lock.lock()
+        let task = activeTask
+        let continuation = completion
+        activeTask = nil
+        completion = nil
+        lock.unlock()
+
+        task?.cancel()
+        continuation?.resume(throwing: CancellationError())
+    }
+
+    private func setPendingError(_ error: Error) {
+        lock.lock()
+        if pendingError == nil {
+            pendingError = error
+        }
+        lock.unlock()
+    }
+
+    private func takePendingError() -> Error? {
+        lock.lock()
+        let error = pendingError
+        pendingError = nil
+        lock.unlock()
+        return error
+    }
+
+    private func finish(with result: Result<Void, Error>) {
+        lock.lock()
+        let continuation = completion
+        completion = nil
+        activeTask = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+    }
+}
+#endif
+
 final class DownloadCoordinator: @unchecked Sendable {
     private let configuration: DownloadConfiguration
     private let metricsStore: MetricsStore
@@ -142,7 +319,9 @@ final class DownloadCoordinator: @unchecked Sendable {
         onError: @escaping @Sendable (String) -> Void
     ) async {
         let sessionConfig = URLSessionConfiguration.ephemeral
+        #if !os(Windows)
         sessionConfig.waitsForConnectivity = false
+        #endif
         sessionConfig.timeoutIntervalForRequest = max(configuration.timeoutSeconds, 1)
         sessionConfig.timeoutIntervalForResource = max(configuration.timeoutSeconds * 4, 30)
 
@@ -259,6 +438,26 @@ final class DownloadCoordinator: @unchecked Sendable {
         request.timeoutInterval = max(configuration.timeoutSeconds, 1)
         request.cachePolicy = .reloadIgnoringLocalCacheData
 
+        #if os(Windows)
+        let processor = ChunkProcessor(
+            workerID: workerID,
+            url: url,
+            configuration: configuration,
+            metricsStore: metricsStore,
+            sink: sink,
+            rateLimiter: rateLimiter
+        )
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.timeoutIntervalForRequest = max(configuration.timeoutSeconds, 1)
+        sessionConfig.timeoutIntervalForResource = max(configuration.timeoutSeconds * 4, 30)
+        let delegate = WindowsStreamingDelegate(processor: processor)
+        let delegateSession = URLSession(configuration: sessionConfig, delegate: delegate, delegateQueue: nil)
+        defer {
+            delegateSession.invalidateAndCancel()
+        }
+        try await delegate.stream(request: request, session: delegateSession)
+        return
+        #else
         let (bytes, response) = try await session.bytes(for: request)
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
             throw DownloadWorkerError.invalidHTTPStatus(http.statusCode)
@@ -327,5 +526,6 @@ final class DownloadCoordinator: @unchecked Sendable {
         }
 
         try await flushBuffer(now: Date())
+        #endif
     }
 }
