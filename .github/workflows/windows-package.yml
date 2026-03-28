@@ -1,0 +1,56 @@
+name: Windows Package
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/windows-package.yml
+      - windows/**
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/windows-package.yml
+      - windows/**
+  workflow_dispatch:
+
+jobs:
+  package-windows:
+    name: Build and package Windows CLI
+    runs-on: windows-2022
+
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: windows/WiFiSoakTester
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Swift
+        uses: compnerd/gha-setup-swift@main
+        with:
+          swift-version: swift-5.10-release
+          swift-build: 5.10-RELEASE
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Resolve package
+        run: swift package resolve
+
+      - name: Run tests
+        run: swift test -c debug
+
+      - name: Build Windows bundle
+        run: powershell -ExecutionPolicy Bypass -File build_windows.ps1
+
+      - name: Smoke test binary
+        run: .\BuildWindows\wifisoaktester-windows-x64\WiFiSoakTester.exe --help
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wifisoaktester-windows-x64
+          path: windows/WiFiSoakTester/BuildWindows/wifisoaktester-windows-x64.zip
+          if-no-files-found: error
