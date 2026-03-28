@@ -27,6 +27,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Visual Studio environment
+        uses: compnerd/gha-setup-vsdevenv@main
+        with:
+          arch: x64
+
       - name: Setup Swift
         uses: compnerd/gha-setup-swift@main
         with:
