@@ -54,7 +54,20 @@ try {
 
     $swiftCommand = Get-Command swiftc -ErrorAction Stop
     $swiftBinDir = Split-Path -Parent $swiftCommand.Source
-    Copy-BundleFiles -SourceDirectory $swiftBinDir -Patterns @("*.dll")
+    $swiftRuntimeDirs = @($swiftBinDir)
+    $swiftRuntimeDirs += $env:PATH -split ";" |
+        ForEach-Object { $_.Trim() } |
+        Where-Object {
+            $_ -and
+            (Test-Path -LiteralPath $_) -and
+            $_ -match '[\\/]Programs[\\/]Swift[\\/](Toolchains|Runtimes)[\\/]'
+        }
+
+    $swiftRuntimeDirs |
+        Select-Object -Unique |
+        ForEach-Object {
+            Copy-BundleFiles -SourceDirectory $_ -Patterns @("*.dll")
+        }
 
     $vcRedistRoot = if ($env:VCToolsRedistDir) {
         Join-Path $env:VCToolsRedistDir "x64"
