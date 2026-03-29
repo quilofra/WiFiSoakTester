@@ -1,0 +1,7 @@
+# Endpoints estáticos permitidos para soak/bandwidth testing.
+https://proof.ovh.net/files/10Gb.dat
+https://proof.ovh.net/files/1Gb.dat
+https://proof.ovh.net/files/100Mb.dat
+https://download.thinkbroadband.com/2GB.zip
+https://download.thinkbroadband.com/1GB.zip
+https://download.thinkbroadband.com/512MB.zip
