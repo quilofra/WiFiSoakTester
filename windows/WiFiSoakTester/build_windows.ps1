@@ -5,6 +5,24 @@ $outputDir = Join-Path $rootDir "BuildWindows"
 $bundleDir = Join-Path $outputDir "wifisoaktester-windows-x64"
 $zipPath = Join-Path $outputDir "wifisoaktester-windows-x64.zip"
 
+function Copy-BundleFiles {
+    param(
+        [string]$SourceDirectory,
+        [string[]]$Patterns
+    )
+
+    if ([string]::IsNullOrWhiteSpace($SourceDirectory) -or -not (Test-Path -LiteralPath $SourceDirectory)) {
+        return
+    }
+
+    foreach ($pattern in $Patterns) {
+        Get-ChildItem -LiteralPath $SourceDirectory -File -Filter $pattern -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $bundleDir $_.Name) -Force
+            }
+    }
+}
+
 Push-Location $rootDir
 try {
     New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
@@ -32,11 +50,23 @@ try {
 
     Copy-Item -Path $exe.FullName -Destination (Join-Path $bundleDir "WiFiSoakTester.exe")
 
-    Get-ChildItem -Path $releaseDir -File |
-        Where-Object { $_.Extension -in @(".dll", ".pdb") } |
-        ForEach-Object {
-            Copy-Item -Path $_.FullName -Destination (Join-Path $bundleDir $_.Name)
-        }
+    Copy-BundleFiles -SourceDirectory $releaseDir -Patterns @("*.dll", "*.pdb")
+
+    $swiftCommand = Get-Command swiftc -ErrorAction Stop
+    $swiftBinDir = Split-Path -Parent $swiftCommand.Source
+    Copy-BundleFiles -SourceDirectory $swiftBinDir -Patterns @("*.dll")
+
+    $vcRedistRoot = if ($env:VCToolsRedistDir) {
+        Join-Path $env:VCToolsRedistDir "x64"
+    }
+
+    if ($vcRedistRoot -and (Test-Path -LiteralPath $vcRedistRoot)) {
+        Get-ChildItem -LiteralPath $vcRedistRoot -Directory |
+            Where-Object { $_.Name -like "Microsoft.VC*.CRT" -or $_.Name -like "Microsoft.VC*.OpenMP" } |
+            ForEach-Object {
+                Copy-BundleFiles -SourceDirectory $_.FullName -Patterns @("*.dll")
+            }
+    }
 
     Copy-Item -Path (Join-Path $rootDir "endpoints.txt") -Destination (Join-Path $bundleDir "endpoints.txt")
     Copy-Item -Path (Join-Path $rootDir "README_WINDOWS.md") -Destination (Join-Path $bundleDir "README_WINDOWS.md")
@@ -47,7 +77,7 @@ setlocal
 cd /d "%~dp0"
 if not exist "exports" mkdir "exports"
 ".\WiFiSoakTester.exe" --endpoints-file "endpoints.txt" --csv-out "exports\stats_current.csv" --html-out "exports\report_current.html"
-pause
+if not defined WIFI_SOAK_NO_PAUSE pause
 '@
     Set-Content -Path (Join-Path $bundleDir "run_default.bat") -Value $launcher -Encoding Ascii
 

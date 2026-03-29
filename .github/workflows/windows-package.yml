@@ -47,8 +47,39 @@ jobs:
       - name: Build Windows bundle
         run: powershell -ExecutionPolicy Bypass -File build_windows.ps1
 
-      - name: Smoke test binary
-        run: .\BuildWindows\wifisoaktester-windows-x64\WiFiSoakTester.exe --help
+      - name: Smoke test bundled binary
+        run: |
+          $bundle = (Resolve-Path .\BuildWindows\wifisoaktester-windows-x64).Path
+          $requiredRuntimeFiles = @(
+            "Foundation.dll",
+            "FoundationEssentials.dll",
+            "FoundationNetworking.dll",
+            "swiftCRT.dll",
+            "swiftCore.dll",
+            "swiftDispatch.dll",
+            "swiftWinSDK.dll",
+            "swift_Concurrency.dll",
+            "VCRUNTIME140.dll"
+          )
+
+          $missing = $requiredRuntimeFiles |
+            Where-Object { -not (Test-Path -LiteralPath (Join-Path $bundle $_)) }
+
+          if ($missing) {
+            throw "Bundle is missing runtime files: $($missing -join ', ')"
+          }
+
+          $originalPath = $env:PATH
+          try {
+            $env:PATH = "$bundle;$env:SystemRoot\System32;$env:SystemRoot"
+            & (Join-Path $bundle "WiFiSoakTester.exe") --help
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          }
+          finally {
+            $env:PATH = $originalPath
+          }
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
